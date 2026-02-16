@@ -6,13 +6,13 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",   // Change to your Render URL later for security
+    origin: "https://bartblast-multiplayer-test.onrender.com",
     methods: ["GET", "POST"]
   }
 });
 
 const MAX_PLAYERS_PER_SERVER = 4;
-let servers = {};  // { serverId: { servername, players: {socket.id: data} } }
+let servers = {};
 
 app.get('/', (req, res) => {
   res.send('Bart Multiplayer Server is running! Connect from Godot.');
