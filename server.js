@@ -16,7 +16,7 @@ app.get("/", (req, res) => {
 wss.on("connection", (ws) => {
   console.log("Player connected");
 
-  ws.id = generateId();
+  ws.playerId = "player_" + Date.now() + "_" + Math.floor(Math.random() * 9999);
 
   ws.on("message", (message) => {
     try {
@@ -35,31 +35,25 @@ wss.on("connection", (ws) => {
 
 function handleMessage(ws, data) {
 
-  // 🔥 JOIN OR CREATE SERVER BY CODE
+  // CREATE SERVER
   if (data.type === "join_server") {
 
-    const code = data.server_code?.toUpperCase();
-    if (!code) return;
+    const serverId = data.server_code; // ← FIXED (was wrong before)
 
-    // Create server if it doesn't exist
-    if (!servers[code]) {
-      servers[code] = {
-        servername: code,
+    if (!servers[serverId]) {
+      servers[serverId] = {
+        servername: serverId,
         players: {},
         max_players: MAX_PLAYERS_PER_SERVER
       };
-      console.log("Created new server:", code);
     }
 
-    // Check if full
-    if (Object.keys(servers[code].players).length >= MAX_PLAYERS_PER_SERVER) {
+    if (Object.keys(servers[serverId].players).length >= MAX_PLAYERS_PER_SERVER) {
       ws.send(JSON.stringify({ join_failed: "Server full" }));
       return;
     }
 
-    // Add player
-    servers[code].players[ws.id] = {
-      id: ws.id,
+    servers[serverId].players[ws.playerId] = {
       name: data.name || "Player",
       pos: [0, 0],
       rot: 0,
@@ -67,49 +61,51 @@ function handleMessage(ws, data) {
       launched: false
     };
 
-    ws.serverCode = code;
+    ws.serverId = serverId;
 
     ws.send(JSON.stringify({
       joined_server: true,
-      server_id: code,
-      servername: code
+      server_id: serverId,
+      servername: servers[serverId].servername,
+      your_id: ws.playerId
     }));
 
-    sendServerState(code);
+    sendServerState(serverId);
   }
 
-  // 🔥 PLAYER UPDATE
   else if (data.type === "update_player") {
-    const code = ws.serverCode;
-    if (!code || !servers[code]) return;
+    const serverId = ws.serverId;
+    if (!serverId || !servers[serverId]) return;
 
-    const player = servers[code].players[ws.id];
-    if (!player) return;
+    const players = servers[serverId].players;
 
-    servers[code].players[ws.id] = {
-      ...player,
+    if (!players[ws.playerId]) return;
+
+    players[ws.playerId] = {
+      ...players[ws.playerId],
       ...data.payload
     };
 
-    sendServerState(code);
+    sendServerState(serverId);
   }
 }
 
-function sendServerState(code) {
-  const s = servers[code];
+function sendServerState(serverId) {
+  const s = servers[serverId];
   if (!s) return;
 
   const state = {
     server_state: {
+      servername: s.servername,
       players_in_server: Object.keys(s.players).length,
-      ...s.players
+      players: s.players
     }
   };
 
   wss.clients.forEach(client => {
     if (
       client.readyState === WebSocket.OPEN &&
-      client.serverCode === code
+      client.serverId === serverId
     ) {
       client.send(JSON.stringify(state));
     }
@@ -117,21 +113,14 @@ function sendServerState(code) {
 }
 
 function removePlayer(ws) {
-  const code = ws.serverCode;
-  if (!code || !servers[code]) return;
+  const serverId = ws.serverId;
+  if (!serverId || !servers[serverId]) return;
 
-  delete servers[code].players[ws.id];
+  delete servers[serverId].players[ws.playerId];
 
-  if (Object.keys(servers[code].players).length === 0) {
-    delete servers[code];
-    console.log("Deleted empty server:", code);
-  } else {
-    sendServerState(code);
+  if (Object.keys(servers[serverId].players).length === 0) {
+    delete servers[serverId];
   }
-}
-
-function generateId() {
-  return Math.random().toString(36).substring(2, 9);
 }
 
 const PORT = process.env.PORT || 3000;
