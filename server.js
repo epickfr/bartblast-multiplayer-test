@@ -1,87 +1,121 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "https://bartblast-multiplayer-test.onrender.com",
-    methods: ["GET", "POST"]
-  }
-});
+const wss = new WebSocket.Server({ server });
 
 const MAX_PLAYERS_PER_SERVER = 4;
 let servers = {};
 
-app.get('/', (req, res) => {
-  res.send('Bart Multiplayer Server is running! Connect from Godot.');
+app.get("/", (req, res) => {
+  res.send("Bart Multiplayer WebSocket Server Running");
 });
 
-io.on('connection', (socket) => {
-  console.log('Player connected:', socket.id);
+wss.on("connection", (ws) => {
+  console.log("Player connected");
 
-  socket.on('create_server', (serverName) => {
-    const serverId = 'server' + Date.now();
+  ws.on("message", (message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      handleMessage(ws, data);
+    } catch (e) {
+      console.log("Invalid JSON:", message.toString());
+    }
+  });
+
+  ws.on("close", () => {
+    removePlayer(ws);
+    console.log("Player disconnected");
+  });
+});
+
+function handleMessage(ws, data) {
+  if (data.type === "create_server") {
+    const serverId = "server" + Date.now();
+
     servers[serverId] = {
-      servername: serverName || "New Bart Crash Server",
+      servername: data.servername || "New Bart Crash Server",
       players: {},
       max_players: MAX_PLAYERS_PER_SERVER
     };
-    socket.join(serverId);
-    socket.emit('joined_server', { server_id: serverId, servername: servers[serverId].servername });
+
+    ws.serverId = serverId;
+
+    ws.send(JSON.stringify({
+      joined_server: true,
+      server_id: serverId,
+      servername: servers[serverId].servername
+    }));
+
     broadcastServerList();
-  });
+  }
 
-  socket.on('join_server', (serverId) => {
+  else if (data.type === "join_server") {
+    const serverId = data.server_id;
+
     if (!servers[serverId]) {
-      socket.emit('join_failed', 'Server not found');
-      return;
-    }
-    if (Object.keys(servers[serverId].players).length >= MAX_PLAYERS_PER_SERVER) {
-      socket.emit('join_failed', 'Server full');
+      ws.send(JSON.stringify({ join_failed: "Server not found" }));
       return;
     }
 
-    servers[serverId].players[socket.id] = {
-      name: `Player${Object.keys(servers[serverId].players).length + 1}`,
+    if (Object.keys(servers[serverId].players).length >= MAX_PLAYERS_PER_SERVER) {
+      ws.send(JSON.stringify({ join_failed: "Server full" }));
+      return;
+    }
+
+    servers[serverId].players[ws._socket.remoteAddress + Date.now()] = {
+      name: "Player",
       pos: [0, 0],
       rot: 0,
       score: 0,
       launched: false
     };
 
-    socket.join(serverId);
-    socket.emit('joined_server', { server_id: serverId, servername: servers[serverId].servername });
-    io.to(serverId).emit('player_joined', socket.id);
+    ws.serverId = serverId;
+
+    ws.send(JSON.stringify({
+      joined_server: true,
+      server_id: serverId,
+      servername: servers[serverId].servername
+    }));
+
+    sendServerState(serverId);
     broadcastServerList();
-  });
+  }
 
-  socket.on('update_player', (data) => {
-    for (let sid in servers) {
-      if (servers[sid].players[socket.id]) {
-        servers[sid].players[socket.id] = { ...servers[sid].players[socket.id], ...data };
-        io.to(sid).emit('server_state', getServerState(sid));
-        break;
-      }
+  else if (data.type === "update_player") {
+    const serverId = ws.serverId;
+    if (!serverId || !servers[serverId]) return;
+
+    const players = servers[serverId].players;
+    const playerId = Object.keys(players)[0];
+
+    players[playerId] = { ...players[playerId], ...data.payload };
+
+    sendServerState(serverId);
+  }
+}
+
+function sendServerState(serverId) {
+  const s = servers[serverId];
+  if (!s) return;
+
+  const state = {
+    server_state: {
+      servername: s.servername,
+      players_in_server: Object.keys(s.players).length,
+      players: s.players
+    }
+  };
+
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN && client.serverId === serverId) {
+      client.send(JSON.stringify(state));
     }
   });
-
-  socket.on('disconnect', () => {
-    for (let sid in servers) {
-      if (servers[sid].players[socket.id]) {
-        delete servers[sid].players[socket.id];
-        io.to(sid).emit('player_left', socket.id);
-        if (Object.keys(servers[sid].players).length === 0) {
-          delete servers[sid];
-        }
-        broadcastServerList();
-        break;
-      }
-    }
-    console.log('Player disconnected:', socket.id);
-  });
-});
+}
 
 function broadcastServerList() {
   const list = Object.entries(servers).map(([id, s]) => ({
@@ -90,24 +124,32 @@ function broadcastServerList() {
     players_in_server: Object.keys(s.players).length,
     max_players: s.max_players
   }));
-  io.emit('server_list', { servers: list });
+
+  const msg = JSON.stringify({ server_list: list });
+
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(msg);
+    }
+  });
 }
 
-function getServerState(serverId) {
-  const s = servers[serverId];
-  if (!s) return {};
-  const playerData = {};
-  Object.entries(s.players).forEach(([pid, data], index) => {
-    playerData[`player${index + 1}`] = { ...data, id: pid };
-  });
-  return {
-    servername: s.servername,
-    players_in_server: Object.keys(s.players).length,
-    ...playerData
-  };
+function removePlayer(ws) {
+  const serverId = ws.serverId;
+  if (!serverId || !servers[serverId]) return;
+
+  delete servers[serverId].players[
+    Object.keys(servers[serverId].players)[0]
+  ];
+
+  if (Object.keys(servers[serverId].players).length === 0) {
+    delete servers[serverId];
+  }
+
+  broadcastServerList();
 }
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Server running on port", PORT);
 });
